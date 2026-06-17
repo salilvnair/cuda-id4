@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """
 Ideogram 4 via the official ideogram4 package — NVIDIA CUDA / RunPod.
-Uses Ideogram4Pipeline (github.com/ideogram-oss/ideogram4), NOT diffusers.
 
-Presets (maps to num_steps):
-  TURBO    — 12 steps, fast preview
-  DEFAULT  — 20 steps, balanced quality (default)
-  QUALITY  — 48 steps, best output
+Presets:  TURBO=12 steps  DEFAULT=20 steps  QUALITY=48 steps
 
 Usage:
   python ideogram4_generate.py "a neon Tokyo street at night"
-  python ideogram4_generate.py "a fox reading under a lantern" --preset QUALITY
-  python ideogram4_generate.py "portrait" --aspect-ratio 9:16
+  python ideogram4_generate.py "portrait" --preset QUALITY --aspect-ratio 9:16
   python ideogram4_generate.py --magic "cartoon cat and crow"
   python ideogram4_generate.py --json prompt.json
 """
@@ -19,7 +14,9 @@ import argparse
 import json
 import os
 import random
+import subprocess
 import sys
+import threading
 import time
 from math import gcd
 from pathlib import Path
@@ -41,7 +38,6 @@ if _hf_token:
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 OUTPUT_DIR  = Path(__file__).parent / "outputs"
-LOCAL_MODEL = Path(__file__).parent / "models" / "ideogram4"
 HF_MODEL_ID = "ideogram-ai/ideogram-4-fp8"
 
 PRESETS = {
@@ -62,6 +58,120 @@ ASPECT_SIZES = {
     "5:4":  (1120, 896),
 }
 
+# ── Pretty-print helpers ───────────────────────────────────────────────────────
+
+W = 62  # banner width
+
+def _hr(char="─"): print(char * W)
+def _banner(title): print(f"\n{'━' * W}\n  {title}\n{'━' * W}")
+def _section(title): print(f"\n── {title} {'─' * (W - len(title) - 4)}")
+
+def _bar(current, total, width=28):
+    pct = min(current / total, 1.0) if total > 0 else 0
+    filled = int(width * pct)
+    return f"[{'█' * filled}{'░' * (width - filled)}] {pct*100:5.1f}%"
+
+def _gpu_info():
+    """Return (name, total_gb, cuda_ver) from torch."""
+    props = torch.cuda.get_device_properties(0)
+    name = props.name
+    total_gb = props.total_memory / 1024**3
+    cuda_ver = torch.version.cuda or "?"
+    return name, total_gb, cuda_ver
+
+def _vram_gb():
+    """Currently allocated VRAM in GB."""
+    return torch.cuda.memory_allocated() / 1024**3
+
+def _nvidia_smi_stats():
+    """Return (util_pct, used_mb, temp_c) via nvidia-smi, or None on failure."""
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            stderr=subprocess.DEVNULL, timeout=2
+        ).decode().strip().split(",")
+        return int(out[0].strip()), int(out[1].strip()), int(out[2].strip())
+    except Exception:
+        return None
+
+def _print_gpu_header():
+    gpu_name, total_gb, cuda_ver = _gpu_info()
+    _banner("Ideogram 4 — CUDA Generation")
+    print(f"  GPU   : {gpu_name}")
+    print(f"  VRAM  : {total_gb:.1f} GB total")
+    print(f"  CUDA  : {cuda_ver}")
+    print(f"  Torch : {torch.__version__}")
+
+# ── Loading monitor ────────────────────────────────────────────────────────────
+
+def _run_loading_monitor(done_event, model_gb=28.0):
+    """Background thread: live VRAM-fill progress bar while model loads."""
+    frames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
+    i = 0
+    t0 = time.time()
+    peak = 0.0
+    while not done_event.is_set():
+        elapsed = time.time() - t0
+        vram = _vram_gb()
+        peak = max(peak, vram)
+        smi = _nvidia_smi_stats()
+        util = f"  GPU util: {smi[0]:3d}%  Temp: {smi[2]}°C" if smi else ""
+        bar = _bar(vram, model_gb)
+        line = f"\r  {frames[i % len(frames)]}  VRAM {vram:5.1f}/{model_gb:.0f} GB  {bar}  {elapsed:5.0f}s{util}"
+        print(line, end='', flush=True)
+        i += 1
+        time.sleep(0.3)
+    elapsed = time.time() - t0
+    vram = _vram_gb()
+    print(f"\r  ✓  VRAM {vram:5.1f} GB  {_bar(vram, model_gb)}  loaded in {elapsed:.1f}s          ")
+    return peak
+
+# ── Inference monitor ──────────────────────────────────────────────────────────
+
+def _run_inference_monitor(done_event, total_steps):
+    """Background thread: elapsed time + GPU stats during denoising."""
+    frames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
+    i = 0
+    t0 = time.time()
+    while not done_event.is_set():
+        elapsed = time.time() - t0
+        smi = _nvidia_smi_stats()
+        if smi:
+            util, used_mb, temp = smi
+            used_gb = used_mb / 1024
+            stats = f"  GPU: {util:3d}%  VRAM: {used_gb:.1f} GB  Temp: {temp}°C"
+        else:
+            stats = ""
+        line = f"\r  {frames[i % len(frames)]}  Generating… {elapsed:5.1f}s  ({total_steps} steps){stats}"
+        print(line, end='', flush=True)
+        i += 1
+        time.sleep(0.3)
+    elapsed = time.time() - t0
+    smi = _nvidia_smi_stats()
+    stats = f"  GPU: {smi[0]}%  Temp: {smi[2]}°C" if smi else ""
+    print(f"\r  ✓  Done in {elapsed:.1f}s{stats}                                        ")
+    return elapsed
+
+# ── Step-level callback (best-effort) ─────────────────────────────────────────
+
+class _StepTracker:
+    def __init__(self, total):
+        self.total = total
+        self.current = 0
+        self.t0 = time.time()
+
+    def __call__(self, step=None, **kwargs):
+        self.current = (step or 0) + 1
+        elapsed = time.time() - self.t0
+        per_step = elapsed / self.current if self.current else 0
+        remaining = per_step * (self.total - self.current)
+        bar = _bar(self.current, self.total, width=24)
+        line = (f"\r  Step {self.current:2d}/{self.total}  {bar}"
+                f"  {elapsed:.1f}s elapsed  ~{remaining:.0f}s left  ")
+        print(line, end='', flush=True)
+
+
 # ── Model loading ──────────────────────────────────────────────────────────────
 
 _pipe = None
@@ -74,16 +184,26 @@ def _load_pipeline():
 
     from ideogram4 import Ideogram4Pipeline, Ideogram4PipelineConfig
 
-    print(f"Loading {HF_MODEL_ID} (cached after first run)...")
+    _section("Loading Model")
+    print(f"  Model : {HF_MODEL_ID}")
+    print(f"  dtype : bfloat16  |  device: cuda")
+    print()
+
     config = Ideogram4PipelineConfig(weights_repo=HF_MODEL_ID)
 
-    t0 = time.time()
+    done = threading.Event()
+    monitor = threading.Thread(target=_run_loading_monitor, args=(done,), daemon=True)
+    monitor.start()
+
     pipe = Ideogram4Pipeline.from_pretrained(
         config=config,
         device="cuda",
         dtype=torch.bfloat16,
     )
-    print(f"  Loaded in {time.time() - t0:.1f}s")
+
+    done.set()
+    monitor.join()
+
     _pipe = pipe
     return pipe
 
@@ -116,11 +236,11 @@ def generate(
     seed: int | None = None,
     output_path: Path | None = None,
 ) -> Path:
+    t_total = time.time()
     pipe = _load_pipeline()
 
     cfg = PRESETS.get(preset.upper(), PRESETS["DEFAULT"])
     width, height = _aspect_size(aspect_ratio)
-
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
 
@@ -132,71 +252,83 @@ def generate(
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
     prompt_text = _format_prompt(prompt)
-    print(f"Prompt : {prompt_text[:120]}")
-    print(f"Preset : {preset}  |  steps={cfg['steps']}  |  {width}x{height}  |  seed={seed}")
 
-    t0 = time.time()
-    # Ideogram4Pipeline returns a list of PIL Images
+    _section("Generating")
+    is_json = prompt_text.strip().startswith('{')
+    prompt_mode = "JSON caption" if is_json else "plain text (use --magic for best quality)"
+    print(f"  Prompt : {prompt_text[:100]}{'…' if len(prompt_text) > 100 else ''}")
+    print(f"  Mode   : {prompt_mode}")
+    print(f"  Preset : {preset.upper()}  |  steps={cfg['steps']}  |  {width}×{height}  |  seed={seed}")
+    print()
+
+    done_inf = threading.Event()
+    monitor_inf = threading.Thread(
+        target=_run_inference_monitor, args=(done_inf, cfg["steps"]), daemon=True
+    )
+    monitor_inf.start()
+
+    # Pipeline requires JSON-structured captions (same format magic prompt produces).
+    # raise_on_caption_issues=False lets plain-text prompts pass through — quality
+    # is lower than a structured caption but it works. Use --magic for best results.
     result = pipe(
         prompt_text,
         num_steps=cfg["steps"],
         height=height,
         width=width,
         seed=seed,
+        raise_on_caption_issues=False,
     )
-    elapsed = time.time() - t0
-    print(f"Done in {elapsed:.1f}s")
+
+    done_inf.set()
+    monitor_inf.join()
 
     image = result[0] if isinstance(result, (list, tuple)) else result
     image.save(str(output_path))
-    print(f"Saved  → {output_path}")
+
+    total_elapsed = time.time() - t_total
+    smi = _nvidia_smi_stats()
+
+    _section("Done")
+    print(f"  Saved    : {output_path}")
+    print(f"  Total    : {total_elapsed:.1f}s")
+    if smi:
+        print(f"  VRAM     : {smi[1] / 1024:.1f} GB used  |  GPU {smi[0]}%  |  {smi[2]}°C")
+    _hr()
+    print()
     return output_path
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main():
+    _print_gpu_header()
+
     parser = argparse.ArgumentParser(
-        description="Generate images with Ideogram 4 (official ideogram4 package / CUDA)",
+        description="Generate images with Ideogram 4 (CUDA)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  python ideogram4_generate.py 'a fox under an autumn lantern'\n"
-            "  python ideogram4_generate.py 'neon Tokyo street' --preset QUALITY\n"
-            "  python ideogram4_generate.py 'portrait' --aspect-ratio 9:16\n"
-            "  python ideogram4_generate.py --magic 'cartoon cat and crow'\n"
-            "  python ideogram4_generate.py --json prompt.json\n"
-        ),
     )
-    parser.add_argument("prompt", nargs="?", default=None, help="Plain text prompt")
-    parser.add_argument("--json", dest="json_path", default=None, metavar="FILE",
-                        help="Pre-built JSON caption file")
-    parser.add_argument("--magic", action="store_true",
-                        help="Auto-convert prompt to structured magic prompt JSON")
+    parser.add_argument("prompt", nargs="?", default=None)
+    parser.add_argument("--json", dest="json_path", default=None, metavar="FILE")
+    parser.add_argument("--magic", action="store_true")
     parser.add_argument("--magic-provider", default=None,
                         choices=["ideogram", "anthropic", "deepseek", "openai", "lmstudio", "ollama"])
     parser.add_argument("--magic-model", default=None, metavar="MODEL")
     parser.add_argument("--magic-base-url", default=None, metavar="URL")
-    parser.add_argument("--save-magic", default=None, metavar="FILE",
-                        help="Save the generated magic-prompt JSON to this file")
-    parser.add_argument("--preset", default="DEFAULT", choices=["TURBO", "DEFAULT", "QUALITY"],
-                        help="TURBO=12 steps, DEFAULT=20, QUALITY=48 (default: DEFAULT)")
-    parser.add_argument("--aspect-ratio", "-a", default="1:1", metavar="W:H",
-                        help="Aspect ratio e.g. 1:1, 16:9, 9:16 (default: 1:1)")
+    parser.add_argument("--save-magic", default=None, metavar="FILE")
+    parser.add_argument("--preset", default="DEFAULT", choices=["TURBO", "DEFAULT", "QUALITY"])
+    parser.add_argument("--aspect-ratio", "-a", default="1:1", metavar="W:H")
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--output", "-o", default=None,
-                        help="Output PNG path (default: outputs/id4_<timestamp>.png)")
+    parser.add_argument("--output", "-o", default=None)
     args = parser.parse_args()
 
     if args.json_path:
         with open(args.json_path) as f:
             prompt = json.load(f)
-        print(f"Using JSON caption from {args.json_path}")
+        print(f"\n  Using JSON caption from {args.json_path}")
     elif args.magic:
         if not args.prompt:
             parser.error("--magic requires a prompt argument")
-        print(f"Prompt  : {args.prompt[:120]}")
-        print("Running magic prompt…", file=sys.stderr)
+        print(f"\n  Running magic prompt for: {args.prompt[:80]}")
         from magic_prompt import convert as magic_convert
         w, h = _aspect_size(args.aspect_ratio)
         d = gcd(w, h); ar = f"{w // d}:{h // d}"
@@ -211,7 +343,7 @@ def main():
             Path(args.save_magic).write_text(
                 json.dumps(prompt, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-            print(f"Magic prompt saved → {args.save_magic}", file=sys.stderr)
+            print(f"  Magic prompt saved → {args.save_magic}")
     elif args.prompt:
         prompt = args.prompt
     else:
