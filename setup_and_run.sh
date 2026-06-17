@@ -188,6 +188,7 @@ fi
 $PYTHON ideogram4_generate.py \
     'a storefront sign that says CUDA WORKS' \
     --preset TURBO \
+    --no-magic \
     --output outputs/test.png \
     $LOW_VRAM_FLAG
 
@@ -200,14 +201,14 @@ echo "GPU:    $GPU_NAME ($VRAM_GB GB VRAM)"
 TORCH_VER=$($PYTHON -c "import torch; print(torch.__version__)")
 echo "Torch:  $TORCH_VER  |  CUDA: $($PYTHON -c "import torch; print(torch.version.cuda)")"
 echo ""
-echo "Generate images (plain text):"
+echo "Generate images (magic prompt ON by default — best quality):"
 echo "  $PYTHON ideogram4_generate.py 'your prompt'"
 echo "  $PYTHON ideogram4_generate.py 'your prompt' --preset QUALITY"
+echo "  $PYTHON ideogram4_generate.py 'your prompt' --save-magic prompt.json"
 echo ""
-echo "Generate with magic prompt (structured JSON caption — best quality):"
-echo "  $PYTHON ideogram4_generate.py --magic 'your prompt'"
-echo "  $PYTHON ideogram4_generate.py --magic 'your prompt' --preset QUALITY"
-echo "  $PYTHON ideogram4_generate.py --magic 'your prompt' --save-magic prompt.json"
+echo "Skip magic (plain text, no LLM key needed):"
+echo "  $PYTHON ideogram4_generate.py --no-magic 'your prompt'"
+echo "  $PYTHON ideogram4_generate.py --no-magic 'your prompt' --preset QUALITY"
 echo ""
 echo "Use a pre-built JSON caption:"
 echo "  $PYTHON ideogram4_generate.py --json prompt.json"

@@ -4,11 +4,19 @@ Ideogram 4 via the official ideogram4 package — NVIDIA CUDA / RunPod.
 
 Presets:  TURBO=12 steps  DEFAULT=20 steps  QUALITY=48 steps
 
+Magic prompt is ON by default — it converts plain text to a structured JSON caption
+(compositional_deconstruction format) for best quality. Requires an LLM key in .env.
+Use --no-magic to pass plain text directly to the pipeline.
+
+The model takes ~2-3 min to load into VRAM once. Use interactive mode (-i) to keep
+it warm and generate multiple images without reloading.
+
 Usage:
   python ideogram4_generate.py "a neon Tokyo street at night"
   python ideogram4_generate.py "portrait" --preset QUALITY --aspect-ratio 9:16
-  python ideogram4_generate.py --magic "cartoon cat and crow"
+  python ideogram4_generate.py --no-magic "cartoon cat and crow"
   python ideogram4_generate.py --json prompt.json
+  python ideogram4_generate.py -i                  # interactive loop — loads once
 """
 import argparse
 import json
@@ -298,6 +306,72 @@ def generate(
     return output_path
 
 
+# ── Interactive loop ───────────────────────────────────────────────────────────
+
+def _interactive_loop(args):
+    """Load the model once, then generate images in a loop until the user quits."""
+    _load_pipeline()  # warm up now so first generation is instant
+
+    print()
+    _hr()
+    print("  Interactive mode — model loaded. Type a prompt and press Enter.")
+    print("  Commands:  preset TURBO|DEFAULT|QUALITY  |  ar 16:9  |  quit")
+    _hr()
+
+    preset = args.preset
+    aspect_ratio = args.aspect_ratio
+    n = 0
+
+    while True:
+        try:
+            raw = input("\n  Prompt> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Bye.")
+            break
+
+        if not raw:
+            continue
+        lower = raw.lower()
+        if lower in ("quit", "exit", "q"):
+            print("  Bye.")
+            break
+        if lower.startswith("preset "):
+            val = raw.split(None, 1)[1].upper()
+            if val in PRESETS:
+                preset = val
+                print(f"  Preset → {preset}")
+            else:
+                print(f"  Unknown preset '{val}'. Options: TURBO DEFAULT QUALITY")
+            continue
+        if lower.startswith("ar "):
+            aspect_ratio = raw.split(None, 1)[1]
+            print(f"  Aspect ratio → {aspect_ratio}")
+            continue
+
+        n += 1
+        if args.no_magic:
+            prompt = raw
+        else:
+            print(f"  Running magic prompt…")
+            from magic_prompt import convert as magic_convert
+            w, h = _aspect_size(aspect_ratio)
+            d = gcd(w, h); ar = f"{w // d}:{h // d}"
+            prompt = magic_convert(
+                raw,
+                aspect_ratio=ar,
+                provider=args.magic_provider,
+                model=args.magic_model,
+                base_url=args.magic_base_url,
+            )
+
+        generate(
+            prompt=prompt,
+            preset=preset,
+            aspect_ratio=aspect_ratio,
+            seed=args.seed,
+        )
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main():
@@ -309,7 +383,8 @@ def main():
     )
     parser.add_argument("prompt", nargs="?", default=None)
     parser.add_argument("--json", dest="json_path", default=None, metavar="FILE")
-    parser.add_argument("--magic", action="store_true")
+    parser.add_argument("--no-magic", dest="no_magic", action="store_true",
+                        help="Skip magic prompt — pass plain text directly to the pipeline")
     parser.add_argument("--magic-provider", default=None,
                         choices=["ideogram", "anthropic", "deepseek", "openai", "lmstudio", "ollama"])
     parser.add_argument("--magic-model", default=None, metavar="MODEL")
@@ -319,15 +394,24 @@ def main():
     parser.add_argument("--aspect-ratio", "-a", default="1:1", metavar="W:H")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--output", "-o", default=None)
+    parser.add_argument("--interactive", "-i", action="store_true",
+                        help="Interactive loop — load model once, generate many images")
     args = parser.parse_args()
+
+    if args.interactive:
+        _interactive_loop(args)
+        return
 
     if args.json_path:
         with open(args.json_path) as f:
             prompt = json.load(f)
         print(f"\n  Using JSON caption from {args.json_path}")
-    elif args.magic:
+    elif args.no_magic:
         if not args.prompt:
-            parser.error("--magic requires a prompt argument")
+            parser.error("a prompt argument is required")
+        prompt = args.prompt
+        print(f"\n  Using plain text prompt (magic disabled)")
+    elif args.prompt:
         print(f"\n  Running magic prompt for: {args.prompt[:80]}")
         from magic_prompt import convert as magic_convert
         w, h = _aspect_size(args.aspect_ratio)
@@ -344,8 +428,6 @@ def main():
                 json.dumps(prompt, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             print(f"  Magic prompt saved → {args.save_magic}")
-    elif args.prompt:
-        prompt = args.prompt
     else:
         parser.print_help()
         sys.exit(1)
