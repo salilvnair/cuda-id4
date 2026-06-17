@@ -77,51 +77,41 @@ if [ -z "$CUDA_VERSION" ] && command -v nvidia-smi &>/dev/null; then
     # Driver version → infer max supported CUDA
     DRIVER_VER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1 | tr -d ' \r')
     DRIVER_MAJOR=$(echo "$DRIVER_VER" | cut -d'.' -f1)
-    if [ "$DRIVER_MAJOR" -ge 545 ]; then
-        CUDA_VERSION="12.4"
-    elif [ "$DRIVER_MAJOR" -ge 530 ]; then
-        CUDA_VERSION="12.1"
-    elif [ "$DRIVER_MAJOR" -ge 520 ]; then
-        CUDA_VERSION="11.8"
-    else
-        CUDA_VERSION="11.8"
+    if   [ "$DRIVER_MAJOR" -ge 570 ]; then CUDA_VERSION="12.8"
+    elif [ "$DRIVER_MAJOR" -ge 560 ]; then CUDA_VERSION="12.6"
+    elif [ "$DRIVER_MAJOR" -ge 550 ]; then CUDA_VERSION="12.4"
+    elif [ "$DRIVER_MAJOR" -ge 530 ]; then CUDA_VERSION="12.1"
+    elif [ "$DRIVER_MAJOR" -ge 520 ]; then CUDA_VERSION="11.8"
+    else                                    CUDA_VERSION="11.8"
     fi
 fi
 
-# Pick the PyTorch wheel index URL
+# Pick the PyTorch wheel index URL — cu128 is needed for CUDA 12.8 / torch >= 2.8
 CUDA_SHORT=$(echo "$CUDA_VERSION" | tr -d '.')
 case "$CUDA_SHORT" in
-    124|125|126) TORCH_INDEX="https://download.pytorch.org/whl/cu124" ;;
+    128|129)     TORCH_INDEX="https://download.pytorch.org/whl/cu128" ;;
+    126|127)     TORCH_INDEX="https://download.pytorch.org/whl/cu126" ;;
+    124|125)     TORCH_INDEX="https://download.pytorch.org/whl/cu124" ;;
     121|122|123) TORCH_INDEX="https://download.pytorch.org/whl/cu121" ;;
     118|119|120) TORCH_INDEX="https://download.pytorch.org/whl/cu118" ;;
-    *)           TORCH_INDEX="https://download.pytorch.org/whl/cu124" ;;  # default to latest stable
+    *)           TORCH_INDEX="https://download.pytorch.org/whl/cu128" ;;  # default to newest
 esac
 
 echo "  CUDA version: ${CUDA_VERSION:-unknown} → using index $TORCH_INDEX"
 
-# Check if torch is already installed with CUDA AND is >= 2.11.0
-# (torchao 0.5+ and diffusers git main both require torch >= 2.11 for FP8 support)
+# Check if torch is already installed with CUDA (any version is a candidate;
+# we upgrade below only if the index can provide something newer than what's installed).
 TORCH_OK=false
-if $PYTHON -c "
-import sys, torch
-v = torch.__version__.split('+')[0].split('.')
-ok = torch.cuda.is_available() and (int(v[0]), int(v[1])) >= (2, 11)
-sys.exit(0 if ok else 1)
-" 2>/dev/null; then
+if $PYTHON -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
     TORCH_VER=$($PYTHON -c "import torch; print(torch.__version__)")
     echo "  PyTorch $TORCH_VER with CUDA already installed — skipping"
     TORCH_OK=true
-else
-    EXISTING_VER=$($PYTHON -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
-    if [ "$EXISTING_VER" != "none" ]; then
-        echo "  PyTorch $EXISTING_VER found but < 2.11.0 — upgrading (torchao requires 2.11+)"
-    fi
 fi
 
 if [ "$TORCH_OK" = false ]; then
-    echo "  Installing PyTorch >= 2.11 from $TORCH_INDEX ..."
+    echo "  Installing latest PyTorch from $TORCH_INDEX ..."
     $PIP install --upgrade pip -q
-    $PIP install "torch>=2.11.0" torchvision torchaudio --index-url "$TORCH_INDEX" -q
+    $PIP install torch torchvision torchaudio --index-url "$TORCH_INDEX" -q
     # Verify CUDA
     if ! $PYTHON -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'" 2>/dev/null; then
         echo ""
