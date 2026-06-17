@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Ideogram 4 via diffusers — NVIDIA CUDA on Linux/RunPod.
-Same model weights as the mflux-id4 Mac version (ideogram-ai/ideogram-4-fp8),
-different runtime: HuggingFace diffusers + PyTorch CUDA instead of MLX.
+Ideogram 4 via the official ideogram4 package — NVIDIA CUDA / RunPod.
+Uses Ideogram4Pipeline (github.com/ideogram-oss/ideogram4), NOT diffusers.
 
-Presets (maps to num_inference_steps):
+Presets (maps to num_steps):
   TURBO    — 12 steps, fast preview
   DEFAULT  — 20 steps, balanced quality (default)
   QUALITY  — 48 steps, best output
@@ -13,12 +12,10 @@ Usage:
   python ideogram4_generate.py "a neon Tokyo street at night"
   python ideogram4_generate.py "a fox reading under a lantern" --preset QUALITY
   python ideogram4_generate.py "portrait" --aspect-ratio 9:16
-  python ideogram4_generate.py --magic "cartoon cat and crow"     # magic prompt
-  python ideogram4_generate.py --json prompt.json                  # pre-built JSON caption
-  python ideogram4_generate.py "sketch" --low-vram                 # < 20 GB VRAM: CPU offload
+  python ideogram4_generate.py --magic "cartoon cat and crow"
+  python ideogram4_generate.py --json prompt.json
 """
 import argparse
-import gc
 import json
 import os
 import random
@@ -28,14 +25,11 @@ from math import gcd
 from pathlib import Path
 
 import torch
-from PIL import Image
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
 # ── HuggingFace authentication ─────────────────────────────────────────────────
-# ideogram-ai/ideogram-4-fp8 is a gated model — you must accept the terms at
-# https://huggingface.co/ideogram-ai/ideogram-4-fp8 and set HF_TOKEN in .env.
 _hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 if _hf_token:
     try:
@@ -46,17 +40,16 @@ if _hf_token:
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-OUTPUT_DIR   = Path(__file__).parent / "outputs"
-LOCAL_MODEL  = Path(__file__).parent / "models" / "ideogram4"
-HF_MODEL_ID  = "ideogram-ai/ideogram-4-fp8"
+OUTPUT_DIR  = Path(__file__).parent / "outputs"
+LOCAL_MODEL = Path(__file__).parent / "models" / "ideogram4"
+HF_MODEL_ID = "ideogram-ai/ideogram-4-fp8"
 
 PRESETS = {
-    "TURBO":   {"steps": 12,  "guidance": 3.5},
-    "DEFAULT": {"steps": 20,  "guidance": 3.5},
-    "QUALITY": {"steps": 48,  "guidance": 4.0},
+    "TURBO":   {"steps": 12,  "cfg": 3.5},
+    "DEFAULT": {"steps": 20,  "cfg": 3.5},
+    "QUALITY": {"steps": 48,  "cfg": 4.0},
 }
 
-# Common aspect ratios → width × height (must be multiples of 16)
 ASPECT_SIZES = {
     "1:1":  (1024, 1024),
     "16:9": (1360, 768),
@@ -74,64 +67,45 @@ ASPECT_SIZES = {
 _pipe = None
 
 
-def _load_pipeline(low_vram: bool = False):
+def _load_pipeline():
     global _pipe
     if _pipe is not None:
         return _pipe
 
-    # DiffusionPipeline (not FluxPipeline) — ideogram-4-fp8 uses a custom
-    # Ideogram4Transformer2DModel architecture that doesn't exist in standard
-    # diffusers. DiffusionPipeline reads model_index.json and loads the correct
-    # custom pipeline class from the repo via trust_remote_code=True.
-    from diffusers import DiffusionPipeline
+    from ideogram4 import Ideogram4Pipeline, Ideogram4PipelineConfig
 
-    model_path = str(LOCAL_MODEL) if LOCAL_MODEL.exists() else HF_MODEL_ID
     if LOCAL_MODEL.exists():
         print(f"Loading from local model: {LOCAL_MODEL}")
+        config = Ideogram4PipelineConfig(weights_path=str(LOCAL_MODEL))
     else:
         print(f"Loading {HF_MODEL_ID} from HuggingFace (first run — large download ~28 GB)...")
         print("  Tip: run `python save_model.py` after this to cache a local copy.")
+        config = Ideogram4PipelineConfig(weights_repo=HF_MODEL_ID)
 
     t0 = time.time()
-    pipe = DiffusionPipeline.from_pretrained(
-        model_path,
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
+    pipe = Ideogram4Pipeline.from_pretrained(
+        config=config,
+        device="cuda",
+        dtype=torch.bfloat16,
     )
-
-    if low_vram:
-        # Sequential CPU offload — slower but works on < 20 GB VRAM
-        pipe.enable_model_cpu_offload()
-        print("  CPU offload enabled (low-VRAM mode)")
-    else:
-        pipe = pipe.to("cuda")
-
-    # Memory savings — minimal quality impact
-    pipe.enable_attention_slicing()
-
     print(f"  Loaded in {time.time() - t0:.1f}s")
     _pipe = pipe
     return pipe
 
 
-# ── Prompt helpers ─────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _format_prompt(prompt) -> str:
-    """Convert plain string or magic-prompt JSON dict to a text string."""
     if isinstance(prompt, str):
         return prompt
-    # Structured caption from magic_prompt.convert() — serialize to JSON so the
-    # model's text encoder sees the same format it was trained on.
     return json.dumps(prompt, ensure_ascii=False)
 
 
 def _aspect_size(ratio: str):
     if ratio in ASPECT_SIZES:
         return ASPECT_SIZES[ratio]
-    # Accept WxH or W:H notation
     try:
         w, h = (int(x) for x in ratio.replace("x", ":").split(":"))
-        # Round to nearest multiple of 16
         return (w // 16 * 16, h // 16 * 16)
     except ValueError:
         print(f"  Warning: unknown aspect ratio '{ratio}', defaulting to 1:1", file=sys.stderr)
@@ -146,23 +120,8 @@ def generate(
     aspect_ratio: str = "1:1",
     seed: int | None = None,
     output_path: Path | None = None,
-    low_vram: bool = False,
 ) -> Path:
-    """
-    Generate an image with Ideogram 4 on CUDA.
-
-    Args:
-        prompt:       Plain string or magic-prompt JSON dict.
-        preset:       TURBO | DEFAULT | QUALITY.
-        aspect_ratio: e.g. "1:1", "16:9", "9:16".
-        seed:         Fixed seed for reproducibility.
-        output_path:  Save path. Auto-generated if None.
-        low_vram:     Enable CPU offload for < 20 GB VRAM.
-
-    Returns:
-        Path to the saved PNG.
-    """
-    pipe = _load_pipeline(low_vram=low_vram)
+    pipe = _load_pipeline()
 
     cfg = PRESETS.get(preset.upper(), PRESETS["DEFAULT"])
     width, height = _aspect_size(aspect_ratio)
@@ -178,25 +137,23 @@ def generate(
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
     prompt_text = _format_prompt(prompt)
-    prompt_preview = prompt_text[:120] if isinstance(prompt_text, str) else str(prompt_text)[:120]
-    print(f"Prompt : {prompt_preview}")
+    print(f"Prompt : {prompt_text[:120]}")
     print(f"Preset : {preset}  |  steps={cfg['steps']}  |  {width}x{height}  |  seed={seed}")
 
-    generator = torch.Generator(device="cuda").manual_seed(seed)
-
     t0 = time.time()
+    # Ideogram4Pipeline returns a list of PIL Images
     result = pipe(
-        prompt=prompt_text,
-        num_inference_steps=cfg["steps"],
-        guidance_scale=cfg["guidance"],
-        width=width,
+        prompt_text,
+        num_steps=cfg["steps"],
+        cfg_scale=cfg["cfg"],
         height=height,
-        generator=generator,
+        width=width,
+        seed=seed,
     )
     elapsed = time.time() - t0
     print(f"Done in {elapsed:.1f}s")
 
-    image: Image.Image = result.images[0]
+    image = result[0] if isinstance(result, (list, tuple)) else result
     image.save(str(output_path))
     print(f"Saved  → {output_path}")
     return output_path
@@ -206,7 +163,7 @@ def generate(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate images with Ideogram 4 (diffusers / CUDA)",
+        description="Generate images with Ideogram 4 (official ideogram4 package / CUDA)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
@@ -215,42 +172,32 @@ def main():
             "  python ideogram4_generate.py 'portrait' --aspect-ratio 9:16\n"
             "  python ideogram4_generate.py --magic 'cartoon cat and crow'\n"
             "  python ideogram4_generate.py --json prompt.json\n"
-            "  python ideogram4_generate.py 'test' --low-vram   # < 20 GB VRAM\n"
         ),
     )
-    parser.add_argument("prompt", nargs="?", default=None,
-                        help="Plain text prompt")
+    parser.add_argument("prompt", nargs="?", default=None, help="Plain text prompt")
     parser.add_argument("--json", dest="json_path", default=None, metavar="FILE",
-                        help="Path to a pre-built JSON caption file (best quality)")
+                        help="Pre-built JSON caption file")
     parser.add_argument("--magic", action="store_true",
-                        help="Auto-convert prompt to magic prompt JSON (like ideogram4 website)")
+                        help="Auto-convert prompt to structured magic prompt JSON")
     parser.add_argument("--magic-provider", default=None,
-                        choices=["ideogram", "anthropic", "deepseek", "openai", "lmstudio", "ollama"],
-                        help="LLM provider for magic prompt (auto-detected from .env)")
-    parser.add_argument("--magic-model", default=None, metavar="MODEL",
-                        help="Model for magic prompt (overrides MAGIC_MODEL in .env)")
-    parser.add_argument("--magic-base-url", default=None, metavar="URL",
-                        help="API base URL override for magic prompt provider")
+                        choices=["ideogram", "anthropic", "deepseek", "openai", "lmstudio", "ollama"])
+    parser.add_argument("--magic-model", default=None, metavar="MODEL")
+    parser.add_argument("--magic-base-url", default=None, metavar="URL")
     parser.add_argument("--save-magic", default=None, metavar="FILE",
-                        help="Save the generated magic-prompt JSON caption to this file")
+                        help="Save the generated magic-prompt JSON to this file")
     parser.add_argument("--preset", default="DEFAULT", choices=["TURBO", "DEFAULT", "QUALITY"],
                         help="TURBO=12 steps, DEFAULT=20, QUALITY=48 (default: DEFAULT)")
     parser.add_argument("--aspect-ratio", "-a", default="1:1", metavar="W:H",
-                        help="Image aspect ratio e.g. 1:1, 16:9, 9:16 (default: 1:1)")
-    parser.add_argument("--seed", type=int, default=None,
-                        help="Fixed seed for reproducibility")
+                        help="Aspect ratio e.g. 1:1, 16:9, 9:16 (default: 1:1)")
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--output", "-o", default=None,
                         help="Output PNG path (default: outputs/id4_<timestamp>.png)")
-    parser.add_argument("--low-vram", action="store_true",
-                        help="Enable CPU offload — use this if you have < 20 GB VRAM")
     args = parser.parse_args()
 
-    # ── Resolve prompt / caption ───────────────────────────────────────────────
     if args.json_path:
         with open(args.json_path) as f:
             prompt = json.load(f)
         print(f"Using JSON caption from {args.json_path}")
-
     elif args.magic:
         if not args.prompt:
             parser.error("--magic requires a prompt argument")
@@ -267,12 +214,12 @@ def main():
             base_url=args.magic_base_url,
         )
         if args.save_magic:
-            Path(args.save_magic).write_text(json.dumps(prompt, ensure_ascii=False, indent=2), encoding="utf-8")
+            Path(args.save_magic).write_text(
+                json.dumps(prompt, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             print(f"Magic prompt saved → {args.save_magic}", file=sys.stderr)
-
     elif args.prompt:
         prompt = args.prompt
-
     else:
         parser.print_help()
         sys.exit(1)
@@ -283,7 +230,6 @@ def main():
         aspect_ratio=args.aspect_ratio,
         seed=args.seed,
         output_path=Path(args.output) if args.output else None,
-        low_vram=args.low_vram,
     )
 
 

@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 """
-Download and save Ideogram 4 weights locally for offline/faster RunPod runs.
+Download and cache Ideogram 4 weights for offline / faster RunPod runs.
 
 Run ONCE after your first setup:
   python save_model.py
 
-Saves to ./models/ideogram4/ (~12–24 GB depending on dtype).
-After this, ideogram4_generate.py loads from that local path — no internet needed.
+Downloads to ./models/ideogram4/ (~28 GB).
+Set MODEL_PATH in .env to point there and subsequent runs skip the download.
 
-On RunPod with persistent storage, save to /workspace instead:
+On RunPod with persistent storage:
   python save_model.py --save-dir /workspace/models/ideogram4
+  # then set MODEL_PATH=/workspace/models/ideogram4 in .env
 """
 import argparse
 import os
 import time
 from pathlib import Path
 
-import torch
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
-# ideogram-ai/ideogram-4-fp8 is gated — authenticate before downloading.
 _hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 if _hf_token:
     try:
@@ -44,30 +43,23 @@ def main():
 
     print(f"Downloading {args.model_id} from HuggingFace...")
     print(f"Save destination: {save_dir}")
-    print("This may take a while — the model is ~12 GB.")
+    print("This may take a while — the model is ~28 GB.")
     print()
 
-    from diffusers import DiffusionPipeline
+    from huggingface_hub import snapshot_download
 
     t0 = time.time()
-    pipe = DiffusionPipeline.from_pretrained(
-        args.model_id,
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
+    local_path = snapshot_download(
+        repo_id=args.model_id,
+        local_dir=str(save_dir),
     )
-    print(f"  Downloaded in {time.time() - t0:.1f}s")
-
-    print(f"\nSaving to {save_dir} ...")
-    t1 = time.time()
-    pipe.save_pretrained(str(save_dir))
-    print(f"  Saved in {time.time() - t1:.1f}s")
+    elapsed = time.time() - t0
+    print(f"\nDownloaded in {elapsed:.1f}s → {local_path}")
 
     size_gb = sum(f.stat().st_size for f in save_dir.rglob("*") if f.is_file()) / 1e9
-    print(f"  Total size on disk: {size_gb:.1f} GB")
-
-    print(f"\nDone. Future runs will load from {save_dir}")
-    print("\nYou can now free the HuggingFace cache to reclaim disk space:")
-    print(f"  rm -rf ~/.cache/huggingface/hub/models--{args.model_id.replace('/', '--')}")
+    print(f"Total size on disk: {size_gb:.1f} GB")
+    print(f"\nDone. Set this in .env to use the local copy:")
+    print(f"  MODEL_PATH={save_dir}")
 
 
 if __name__ == "__main__":

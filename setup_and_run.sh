@@ -124,17 +124,8 @@ if [ "$TORCH_OK" = false ]; then
     echo "  PyTorch $TORCH_VER installed with CUDA ✓"
 fi
 
-# Install base dependencies (everything except torch and torchao)
+# Install all dependencies including ideogram4 from git (see requirements.txt)
 $PIP install -r requirements.txt -q
-
-# torchao must come after torch >= 2.11 (it won't import on older versions)
-echo "  Installing torchao (FP8 quantization support)..."
-$PIP install --upgrade torchao -q
-
-# ideogram-ai/ideogram-4-fp8 uses Ideogram4Transformer2DModel which is not yet
-# in a released diffusers pip package. Install from git main to get it.
-echo "  Installing diffusers from git main (required for Ideogram4Transformer2DModel)..."
-$PIP install --upgrade "git+https://github.com/huggingface/diffusers.git" -q
 echo "  All dependencies installed ✓"
 
 # ── 5. Check .env ─────────────────────────────────────────────────────────────

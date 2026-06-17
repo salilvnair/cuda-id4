@@ -1,14 +1,6 @@
-# NOTE: Install order matters — see setup_and_run.sh which handles:
-#   1. torch >= 2.11 (CUDA wheel, specific index)
-#   2. torchao (after torch, needs 2.11+)
-#   3. diffusers from git main (Ideogram4Transformer2DModel not in pip release yet)
-# The lines below are floors only; setup_and_run.sh overrides diffusers with git main.
-diffusers>=0.33.0
-transformers>=4.45.0
-accelerate>=1.0.0
+# NOTE: PyTorch is installed separately in setup_and_run.sh with the correct CUDA wheel.
+ideogram4 @ git+https://github.com/ideogram-oss/ideogram4.git
 huggingface-hub>=0.26.0
-sentencepiece
-protobuf
 Pillow>=10.0.0
 python-dotenv>=1.0.0
 openai>=1.0.0
