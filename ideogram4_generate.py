@@ -45,9 +45,9 @@ LOCAL_MODEL = Path(__file__).parent / "models" / "ideogram4"
 HF_MODEL_ID = "ideogram-ai/ideogram-4-fp8"
 
 PRESETS = {
-    "TURBO":   {"steps": 12,  "cfg": 3.5},
-    "DEFAULT": {"steps": 20,  "cfg": 3.5},
-    "QUALITY": {"steps": 48,  "cfg": 4.0},
+    "TURBO":   {"steps": 12},
+    "DEFAULT": {"steps": 20},
+    "QUALITY": {"steps": 48},
 }
 
 ASPECT_SIZES = {
@@ -145,7 +145,6 @@ def generate(
     result = pipe(
         prompt_text,
         num_steps=cfg["steps"],
-        cfg_scale=cfg["cfg"],
         height=height,
         width=width,
         seed=seed,
