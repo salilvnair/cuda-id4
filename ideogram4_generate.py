@@ -33,6 +33,17 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
+# ── HuggingFace authentication ─────────────────────────────────────────────────
+# ideogram-ai/ideogram-4-fp8 is a gated model — you must accept the terms at
+# https://huggingface.co/ideogram-ai/ideogram-4-fp8 and set HF_TOKEN in .env.
+_hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+if _hf_token:
+    try:
+        from huggingface_hub import login as _hf_login
+        _hf_login(token=_hf_token, add_to_git_credential=False)
+    except Exception:
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = _hf_token
+
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 OUTPUT_DIR   = Path(__file__).parent / "outputs"
@@ -68,17 +79,21 @@ def _load_pipeline(low_vram: bool = False):
     if _pipe is not None:
         return _pipe
 
-    from diffusers import FluxPipeline
+    # DiffusionPipeline (not FluxPipeline) — ideogram-4-fp8 uses a custom
+    # Ideogram4Transformer2DModel architecture that doesn't exist in standard
+    # diffusers. DiffusionPipeline reads model_index.json and loads the correct
+    # custom pipeline class from the repo via trust_remote_code=True.
+    from diffusers import DiffusionPipeline
 
     model_path = str(LOCAL_MODEL) if LOCAL_MODEL.exists() else HF_MODEL_ID
     if LOCAL_MODEL.exists():
         print(f"Loading from local model: {LOCAL_MODEL}")
     else:
-        print(f"Loading {HF_MODEL_ID} from HuggingFace (first run — large download ~12 GB)...")
+        print(f"Loading {HF_MODEL_ID} from HuggingFace (first run — large download ~28 GB)...")
         print("  Tip: run `python save_model.py` after this to cache a local copy.")
 
     t0 = time.time()
-    pipe = FluxPipeline.from_pretrained(
+    pipe = DiffusionPipeline.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,

@@ -12,10 +12,23 @@ On RunPod with persistent storage, save to /workspace instead:
   python save_model.py --save-dir /workspace/models/ideogram4
 """
 import argparse
+import os
 import time
 from pathlib import Path
 
 import torch
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
+
+# ideogram-ai/ideogram-4-fp8 is gated — authenticate before downloading.
+_hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+if _hf_token:
+    try:
+        from huggingface_hub import login as _hf_login
+        _hf_login(token=_hf_token, add_to_git_credential=False)
+    except Exception:
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = _hf_token
 
 
 def main():
@@ -34,10 +47,10 @@ def main():
     print("This may take a while — the model is ~12 GB.")
     print()
 
-    from diffusers import FluxPipeline
+    from diffusers import DiffusionPipeline
 
     t0 = time.time()
-    pipe = FluxPipeline.from_pretrained(
+    pipe = DiffusionPipeline.from_pretrained(
         args.model_id,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
