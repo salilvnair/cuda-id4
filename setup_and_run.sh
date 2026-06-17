@@ -99,19 +99,30 @@ esac
 
 echo "  CUDA version: ${CUDA_VERSION:-unknown} → using index $TORCH_INDEX"
 
-# Check if torch is already installed and has CUDA
+# Check if torch is already installed with CUDA AND is >= 2.11.0
+# (torchao 0.5+ and diffusers git main both require torch >= 2.11 for FP8 support)
 TORCH_OK=false
-if $PYTHON -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
+if $PYTHON -c "
+import sys, torch
+v = torch.__version__.split('+')[0].split('.')
+ok = torch.cuda.is_available() and (int(v[0]), int(v[1])) >= (2, 11)
+sys.exit(0 if ok else 1)
+" 2>/dev/null; then
     TORCH_VER=$($PYTHON -c "import torch; print(torch.__version__)")
     echo "  PyTorch $TORCH_VER with CUDA already installed — skipping"
     TORCH_OK=true
+else
+    EXISTING_VER=$($PYTHON -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
+    if [ "$EXISTING_VER" != "none" ]; then
+        echo "  PyTorch $EXISTING_VER found but < 2.11.0 — upgrading (torchao requires 2.11+)"
+    fi
 fi
 
 if [ "$TORCH_OK" = false ]; then
-    echo "  Installing PyTorch from $TORCH_INDEX ..."
+    echo "  Installing PyTorch >= 2.11 from $TORCH_INDEX ..."
     $PIP install --upgrade pip -q
-    $PIP install torch torchvision torchaudio --index-url "$TORCH_INDEX" -q
-    # Verify
+    $PIP install "torch>=2.11.0" torchvision torchaudio --index-url "$TORCH_INDEX" -q
+    # Verify CUDA
     if ! $PYTHON -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'" 2>/dev/null; then
         echo ""
         echo "  ERROR: PyTorch installed but torch.cuda.is_available() is False."
@@ -123,8 +134,12 @@ if [ "$TORCH_OK" = false ]; then
     echo "  PyTorch $TORCH_VER installed with CUDA ✓"
 fi
 
-# Install remaining dependencies
+# Install base dependencies (everything except torch and torchao)
 $PIP install -r requirements.txt -q
+
+# torchao must come after torch >= 2.11 (it won't import on older versions)
+echo "  Installing torchao (FP8 quantization support)..."
+$PIP install --upgrade torchao -q
 
 # ideogram-ai/ideogram-4-fp8 uses Ideogram4Transformer2DModel which is not yet
 # in a released diffusers pip package. Install from git main to get it.
