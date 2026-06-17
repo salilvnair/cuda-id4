@@ -74,13 +74,8 @@ def _load_pipeline():
 
     from ideogram4 import Ideogram4Pipeline, Ideogram4PipelineConfig
 
-    if LOCAL_MODEL.exists():
-        print(f"Loading from local model: {LOCAL_MODEL}")
-        config = Ideogram4PipelineConfig(weights_path=str(LOCAL_MODEL))
-    else:
-        print(f"Loading {HF_MODEL_ID} from HuggingFace (first run — large download ~28 GB)...")
-        print("  Tip: run `python save_model.py` after this to cache a local copy.")
-        config = Ideogram4PipelineConfig(weights_repo=HF_MODEL_ID)
+    print(f"Loading {HF_MODEL_ID} (cached after first run)...")
+    config = Ideogram4PipelineConfig(weights_repo=HF_MODEL_ID)
 
     t0 = time.time()
     pipe = Ideogram4Pipeline.from_pretrained(
