@@ -1,5 +1,5 @@
 # NOTE: PyTorch is installed separately in setup_and_run.sh with the correct CUDA wheel.
-ideogram4 @ git+https://github.com/ideogram-oss/ideogram4.git
+git+https://github.com/ideogram-oss/ideogram4.git
 huggingface-hub>=0.26.0
 Pillow>=10.0.0
 python-dotenv>=1.0.0
