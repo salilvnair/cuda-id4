@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Environment
+.env
+
+# Model weights (large — save to RunPod persistent storage instead)
+models/
+
+# Generated outputs
+outputs/*.png
+outputs/*.jpg
+outputs/*.jpeg
+outputs/*.webp
+outputs/*.avif
+
+# JSON captions (keep example_prompt.json)
+*.json
+!example_prompt.json
+
+# Misc
+.DS_Store
+*.egg-info/
+dist/
+build/

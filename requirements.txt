@@ -1,0 +1,13 @@
+# NOTE: PyTorch is installed separately in setup_and_run.sh with the correct CUDA wheel.
+# Run  ./setup_and_run.sh  to install everything in the right order.
+diffusers>=0.32.0
+transformers>=4.45.0
+accelerate>=1.0.0
+huggingface-hub>=0.26.0
+sentencepiece
+protobuf
+Pillow>=10.0.0
+python-dotenv>=1.0.0
+openai>=1.0.0
+anthropic>=0.25.0
+requests>=2.31.0
