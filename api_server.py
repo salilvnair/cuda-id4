@@ -46,6 +46,7 @@ if _hf_token:
 
 import torch
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -138,6 +139,13 @@ app = FastAPI(
     title="Ideogram 4 API",
     description="Generate images with Ideogram 4 FP8 on NVIDIA CUDA.",
     version="2.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ── Routes ──────────────────────────────────────────────────────────────────────
